@@ -1,0 +1,63 @@
+{
+	"name": "eext-pcb-component-grouping",
+	"uuid": "dbc97b0e719e418b953f012be055c7a2",
+	"displayName": "PCB器件分组器",
+	"description": "基于文档源码的器件快速分组扩展，将PCB中的散杂器件按照原理图图页或图页内矩形框分组，支持复杂多器件工程。",
+	"version": "1.8.2",
+	"publisher": "easyeda",
+	"engines": {
+		"eda": "^3.2.0"
+	},
+	"license": "Apache-2.0",
+	"repository": {
+		"type": "github",
+		"url": "https://github.com/easyeda/eext-pcb-component-grouping"
+	},
+	"categories": "PCB",
+	"keywords": [
+		"Tool"
+	],
+	"images": {
+		"logo": "./images/logo.png"
+	},
+	"homepage": "https://github.com/easyeda",
+	"bugs": "https://github.com/easyeda/eext-pcb-component-grouping/issues",
+	"activationEvents": {},
+	"entry": "./dist/index",
+	"dependentExtensions": {},
+	"headerMenus": {
+		"pcb": [
+			{
+				"id": "menuId3",
+				"title": "PCB器件分组器",
+				"menuItems": [
+					{
+						"id": "GroupingRectangle",
+						"title": "矩形分组",
+						"registerFn": "groupingRectangle"
+					},
+					{
+						"id": "GroupingPage",
+						"title": "图页分组",
+						"registerFn": "groupingPage"
+					},
+					{
+						"id": "GroupingSelection",
+						"title": "选中分组",
+						"registerFn": "groupingSelection"
+					},
+					{
+						"id": "GroupingRollback",
+						"title": "回退分组源码",
+						"registerFn": "groupingRollback"
+					},
+					{
+						"id": "About",
+						"title": "About...",
+						"registerFn": "about"
+					}
+				]
+			}
+		]
+	}
+}
