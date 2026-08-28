@@ -5,7 +5,6 @@
 # Dependencies and generated output
 /node_modules/
 /dist/
-/build/dist/
 /coverage/
 /.eslintcache
 debug.log
