@@ -96,18 +96,38 @@ function buildPageResult(source: string, boardName: string, boardIndex: number, 
 		const anchorY = component.designatorY ?? component.y;
 		const hits = parsed.rects.filter(rect => containsPoint(rect.bbox, anchorX, anchorY) || containsPoint(rect.bbox, component.x, component.y)).sort((a, b) => (a.bbox.maxX - a.bbox.minX) * (a.bbox.maxY - a.bbox.minY) - (b.bbox.maxX - b.bbox.minX) * (b.bbox.maxY - b.bbox.minY));
 		const rect = hits[0];
-		if (!rect)
+		if (!rect && mode !== 'hybrid')
 			warnings.push(`页面 ${pageName} 中器件 ${component.designator || component.id} 未落入任何矩形（锚点 ${anchorX},${anchorY}）。`);
 		return toSchematicComponent(component, pageName, parsed.uuid, rect?.id ?? null, rect?.label ?? null);
 	});
+	const rectangles = parsed.rects.map(rect => ({ primitiveId: rect.id, label: rect.label, bbox: rect.bbox, components: assignments.filter(item => item.rectangleId === rect.id), texts: parsed.texts.filter(item => containsPoint(rect.bbox, item.x, item.y) || intersects(rect.bbox, item.bbox)).map(item => toSchematicText(item, pageName, parsed.uuid)) }));
+	const unclassified = assignments.filter(item => !item.rectangleId);
+	if (mode === 'hybrid' && unclassified.length) {
+		const pageGroupId = `page-unframed-${parsed.uuid}`;
+		const points = unclassified.map(component => ({ minX: component.x, minY: component.y, maxX: component.x, maxY: component.y }));
+		const bbox: BBox = {
+			minX: Math.min(...points.map(item => item.minX)),
+			minY: Math.min(...points.map(item => item.minY)),
+			maxX: Math.max(...points.map(item => item.maxX)),
+			maxY: Math.max(...points.map(item => item.maxY)),
+		};
+		const framedTextIds = new Set(rectangles.flatMap(rectangle => rectangle.texts.map(text => text.primitiveId)));
+		rectangles.push({
+			primitiveId: pageGroupId,
+			label: `${pageName}（未框选）`,
+			bbox,
+			components: unclassified.map(component => ({ ...component, rectangleId: pageGroupId, rectangleLabel: `${pageName}（未框选）` })),
+			texts: parsed.texts.filter(item => !framedTextIds.has(item.id)).map(item => toSchematicText(item, pageName, parsed.uuid)),
+		});
+	}
 	return {
 		boardName,
 		boardIndex,
 		schematicUuid,
 		pageUuid: parsed.uuid,
 		pageName,
-		rectangles: parsed.rects.map(rect => ({ primitiveId: rect.id, label: rect.label, bbox: rect.bbox, components: assignments.filter(item => item.rectangleId === rect.id), texts: parsed.texts.filter(item => containsPoint(rect.bbox, item.x, item.y) || intersects(rect.bbox, item.bbox)).map(item => toSchematicText(item, pageName, parsed.uuid)) })),
-		unclassified: assignments.filter(item => !item.rectangleId),
+		rectangles,
+		unclassified: mode === 'hybrid' ? [] : unclassified,
 		warnings,
 	};
 }
@@ -259,24 +279,27 @@ function normalizedDesignator(value: string): string {
 }
 
 function planGroups(pages: PageGroupingResult[], pcbComponents: SourcePcbComponent[]): PlannedGroup[] {
+	const movableComponents = pcbComponents.filter(component => !component.locked);
 	const claimed = new Set<string>();
 	const groups: PlannedGroup[] = [];
-	for (const page of pages) {
-		for (const rect of page.rectangles) {
-			const components: SourcePcbComponent[] = [];
-			for (const item of rect.components) {
-				const wanted = normalizedDesignator(item.designator);
-				if (!wanted)
-					continue;
-				const pcb = pcbComponents.find(component => normalizedDesignator(component.designator) === wanted) ?? matchByDesignator(item.designator, pcbComponents);
-				if (!pcb || claimed.has(pcb.id))
-					continue;
-				claimed.add(pcb.id);
-				components.push(pcb);
-			}
-			if (components.length)
-				groups.push({ page, label: rect.label, sourceRectId: rect.primitiveId, texts: rect.texts, components });
+	const ordered = pages.flatMap(page => page.rectangles.map(rect => ({ page, rect })));
+	// Hybrid page-level remainder groups are always placed after all explicit
+	// schematic rectangles across the Board.
+	ordered.sort((a, b) => Number(a.rect.primitiveId.startsWith('page-unframed-')) - Number(b.rect.primitiveId.startsWith('page-unframed-')));
+	for (const { page, rect } of ordered) {
+		const components: SourcePcbComponent[] = [];
+		for (const item of rect.components) {
+			const wanted = normalizedDesignator(item.designator);
+			if (!wanted)
+				continue;
+			const pcb = movableComponents.find(component => normalizedDesignator(component.designator) === wanted) ?? matchByDesignator(item.designator, movableComponents);
+			if (!pcb || claimed.has(pcb.id))
+				continue;
+			claimed.add(pcb.id);
+			components.push(pcb);
 		}
+		if (components.length)
+			groups.push({ page, label: rect.label, sourceRectId: rect.primitiveId, texts: rect.texts, components });
 	}
 	return groups;
 }
@@ -434,26 +457,30 @@ export async function collectProjectGroupingFromSource(mode: GroupingMode): Prom
 	if (!project)
 		throw new Error('当前没有打开工程。');
 	if (mode === 'selection')
-		throw new Error('源码模式暂不支持选中分组，请使用矩形分组或图页分组。');
+		throw new Error('源码模式暂不支持选中分组，请使用矩形分组、图页分组或混合分组。');
+	const currentDocument = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+	if (!currentDocument?.uuid)
+		throw new Error('无法识别当前文档，请先打开当前 Board 的原理图页或 PCB。');
+	const boardIndex = project.data.findIndex((board: any) => board.pcb?.uuid === currentDocument.uuid || (board.schematic?.page ?? []).some((page: any) => page.uuid === currentDocument.uuid));
+	if (boardIndex < 0)
+		throw new Error('当前文档不属于工程中的任何 Board。');
+	const board = project.data[boardIndex];
 	const pages: PageGroupingResult[] = [];
 	let pcbSource = '';
 	let pcbUuid = '';
-	for (let boardIndex = 0; boardIndex < project.data.length; boardIndex++) {
-		const board = project.data[boardIndex];
-		for (const page of board.schematic?.page ?? []) {
-			const tab = await eda.dmt_EditorControl.openDocument(page.uuid);
-			await eda.dmt_EditorControl.activateDocument(tab);
-			const source = await eda.sys_FileManager.getDocumentSource();
-			if (!source)
-				throw new Error(`无法获取原理图源码：${page.name}`);
-			pages.push(buildPageResult(source, board.name, boardIndex, board.schematic.uuid, page.name, mode));
-		}
-		if (board.pcb?.uuid) {
-			const tab = await eda.dmt_EditorControl.openDocument(board.pcb.uuid);
-			await eda.dmt_EditorControl.activateDocument(tab);
-			pcbSource = await eda.sys_FileManager.getDocumentSource();
-			pcbUuid = board.pcb.uuid;
-		}
+	for (const page of board.schematic?.page ?? []) {
+		const tab = await eda.dmt_EditorControl.openDocument(page.uuid);
+		await eda.dmt_EditorControl.activateDocument(tab);
+		const source = await eda.sys_FileManager.getDocumentSource();
+		if (!source)
+			throw new Error(`无法获取原理图源码：${page.name}`);
+		pages.push(buildPageResult(source, board.name, boardIndex, board.schematic.uuid, page.name, mode));
+	}
+	if (board.pcb?.uuid) {
+		const tab = await eda.dmt_EditorControl.openDocument(board.pcb.uuid);
+		await eda.dmt_EditorControl.activateDocument(tab);
+		pcbSource = await eda.sys_FileManager.getDocumentSource();
+		pcbUuid = board.pcb.uuid;
 	}
 	if (!pcbSource)
 		throw new Error('工程中没有可用的 PCB 源码。');

@@ -14,7 +14,7 @@ export function about(): void {
 	);
 }
 
-async function runGrouping(mode: 'rectangle' | 'page' | 'selection', label: string): Promise<void> {
+async function runGrouping(mode: 'rectangle' | 'page' | 'selection' | 'hybrid', label: string): Promise<void> {
 	try {
 		eda.sys_Message.showToastMessage(`正在执行${label}...`);
 		const result = await collectProjectGroupingFromSource(mode);
@@ -38,6 +38,10 @@ export async function groupingPage(): Promise<void> {
 
 export async function groupingSelection(): Promise<void> {
 	await runGrouping('selection', '选中分组');
+}
+
+export async function groupingHybrid(): Promise<void> {
+	await runGrouping('hybrid', '混合分组');
 }
 
 export async function groupingRollback(): Promise<void> {

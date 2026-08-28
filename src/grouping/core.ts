@@ -129,7 +129,7 @@ interface CollectedBoardGrouping {
 	warnings: string[];
 }
 
-export type GroupingMode = 'rectangle' | 'page' | 'selection';
+export type GroupingMode = 'rectangle' | 'page' | 'selection' | 'hybrid';
 
 export const GROUPING_STORAGE_KEY = 'schematic-pcb-grouping:last-result';
 const OVERLAY_STORAGE_KEY = 'schematic-pcb-grouping:pcb-overlay-ids';

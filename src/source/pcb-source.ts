@@ -11,6 +11,7 @@ export interface SourcePcbComponent {
 	angle: number;
 	layerId: number;
 	groupId: number | string;
+	locked: boolean;
 	data: Record<string, unknown>;
 	header: SourceRecord['header'];
 }
@@ -31,6 +32,10 @@ function stringValue(value: unknown): string {
 
 function numberValue(value: unknown, fallback = 0): number {
 	return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function booleanValue(value: unknown): boolean {
+	return value === true || value === 1 || value === '1' || (typeof value === 'string' && value.toLowerCase() === 'true');
 }
 
 function attributeValue(attrs: Record<string, unknown>, key: string): string {
@@ -67,6 +72,7 @@ export function extractPcbDocument(source: string): ParsedPcbDocument {
 			angle: numberValue(data.rotation ?? data.angle),
 			layerId: numberValue(data.layerId),
 			groupId: typeof data.groupId === 'string' ? data.groupId : numberValue(data.groupId),
+			locked: booleanValue(data.locked ?? data.primitiveLock ?? data.isLocked),
 			data,
 			header: record.header,
 		};
