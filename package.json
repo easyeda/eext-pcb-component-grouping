@@ -14,6 +14,7 @@
 	},
 	"scripts": {
 		"compile": "rimraf ./dist/ && ts-node ./config/esbuild.prod.ts",
+		"test": "ts-node --esm tests/shape-geometry.test.ts",
 		"lint": "eslint",
 		"fix": "eslint --fix",
 		"build": "npm run compile && ts-node ./build/packaged.ts",
