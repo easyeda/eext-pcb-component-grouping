@@ -1,0 +1,11 @@
+{"type":"DOCHEAD","ticket":0}||{"docType":"SCH","uuid":"page-shapes","client":"fixture"}|
+{"type":"RECT","id":"rect-1","ticket":1}||{"dotX1":100,"dotY1":200,"dotX2":40,"dotY2":80,"rotation":90}|
+{"type":"POLY","id":"poly-1","ticket":2}||{"points":[10,20,50,20,50,60],"closed":true}|
+{"type":"CIRCLE","id":"circle-1","ticket":3}||{"centerX":200,"centerY":100,"radius":15}|
+{"type":"ELLIPSE","id":"ellipse-1","ticket":4}||{"centerX":300,"centerY":100,"radiusX":30,"radiusY":10,"rotation":90}|
+{"type":"ARC","id":"arc-1","ticket":5}||{"startX":0,"startY":0,"referX":10,"referY":10,"endX":20,"endY":0}|
+{"type":"COMPONENT","id":"component-1","ticket":6}||{"x":12,"y":34}|
+{"type":"ATTR","id":"attr-component","ticket":7}||{"parentId":"component-1","key":"Designator","value":"U1"}|
+{"type":"TEXT","id":"text-1","ticket":8}||{"x":5,"y":6,"value":"keep me"}|
+{"type":"RECT","id":"rect-1","ticket":9}||{"dotX1":1,"dotY1":2,"dotX2":3,"dotY2":4,"rotation":0}|
+{"type":"UNKNOWN","id":"unknown-1","ticket":10}||{"preserve":true}|

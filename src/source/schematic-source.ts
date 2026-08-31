@@ -1,4 +1,5 @@
 import type { SourceRecord } from './source-log';
+import { circleBBox, ellipseBBox, polylineBBox, rectangleBBox } from './shape-geometry';
 import { effectiveRecordsByType, parseSourceLog } from './source-log';
 
 export interface BBox {
@@ -38,9 +39,23 @@ export interface SourceRect {
 	bbox: BBox;
 }
 
+export type SourceSchematicShape
+	= | { id: string; type: 'RECT'; rotation: number; bbox: BBox; corner1: { x: number; y: number }; corner2: { x: number; y: number } }
+		| { id: string; type: 'POLY'; points: Array<{ x: number; y: number }>; closed: boolean; bbox: BBox }
+		| { id: string; type: 'CIRCLE'; center: { x: number; y: number }; radius: number; bbox: BBox }
+		| { id: string; type: 'ELLIPSE'; center: { x: number; y: number }; radiusX: number; radiusY: number; rotation: number; bbox: BBox };
+
+export interface SourceSchematicDiagnostic {
+	id: string;
+	type: string;
+	message: string;
+}
+
 export interface ParsedSchematicPage {
 	uuid: string;
 	rects: SourceRect[];
+	shapes: SourceSchematicShape[];
+	diagnostics: SourceSchematicDiagnostic[];
 	components: SourceSchematicComponent[];
 	texts: SourceSchematicText[];
 }
@@ -53,41 +68,89 @@ function text(value: unknown, fallback = ''): string {
 	return typeof value === 'string' ? value.trim() || fallback : fallback;
 }
 
-function bbox(points: Array<[number, number]>): BBox {
-	return {
-		minX: Math.min(...points.map(point => point[0])),
-		minY: Math.min(...points.map(point => point[1])),
-		maxX: Math.max(...points.map(point => point[0])),
-		maxY: Math.max(...points.map(point => point[1])),
-	};
+function primitiveData(record: SourceRecord): Record<string, unknown> {
+	return record.data && typeof record.data === 'object' ? record.data as Record<string, unknown> : {};
 }
 
 function rectBBox(data: Record<string, unknown>): BBox {
-	const x1 = number(data.dotX1);
-	const y1 = number(data.dotY1);
-	const x2 = number(data.dotX2);
-	const y2 = number(data.dotY2);
-	const rotation = number(data.rotation);
-	const radians = rotation * Math.PI / 180;
-	const cos = Math.cos(radians);
-	const sin = Math.sin(radians);
-	const points: Array<[number, number]> = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]].map(([x, y]) => [
-		x1 + (x - x1) * cos - (y - y1) * sin,
-		y1 + (x - x1) * sin + (y - y1) * cos,
-	]);
-	return bbox(points);
+	return rectangleBBox({
+		x1: number(data.dotX1),
+		y1: number(data.dotY1),
+		x2: number(data.dotX2),
+		y2: number(data.dotY2),
+	});
 }
 
-function primitiveData(record: SourceRecord): Record<string, unknown> {
-	return record.data && typeof record.data === 'object' ? record.data as Record<string, unknown> : {};
+function parsePolyPoints(points: unknown): Array<{ x: number; y: number }> | null {
+	if (!Array.isArray(points) || points.length === 0 || points.length % 2 !== 0)
+		return null;
+	const parsed: Array<{ x: number; y: number }> = [];
+	for (let index = 0; index < points.length; index += 2) {
+		const x = number(points[index], Number.NaN);
+		const y = number(points[index + 1], Number.NaN);
+		if (!Number.isFinite(x) || !Number.isFinite(y))
+			return null;
+		parsed.push({ x, y });
+	}
+	return parsed;
+}
+
+function parseShapeRecord(record: SourceRecord, attrs: Record<string, string>, diagnostics: SourceSchematicDiagnostic[]): SourceSchematicShape | null {
+	const data = primitiveData(record);
+	const id = String(record.header.id);
+	switch (record.header.type) {
+		case 'RECT': {
+			const rotation = number(data.rotation);
+			const corner1 = { x: number(data.dotX1), y: number(data.dotY1) };
+			const corner2 = { x: number(data.dotX2), y: number(data.dotY2) };
+			const bbox = rectBBox(data);
+			return { id, type: 'RECT', rotation, bbox, corner1, corner2 };
+		}
+		case 'POLY': {
+			const points = parsePolyPoints(data.points);
+			if (!points || points.length < 2) {
+				diagnostics.push({ id, type: 'POLY', message: 'POLY has invalid or missing points' });
+				return null;
+			}
+			const closed = data.closed === true || data.closed === 1;
+			return { id, type: 'POLY', points, closed, bbox: polylineBBox(points, closed) };
+		}
+		case 'CIRCLE': {
+			const center = { x: number(data.centerX), y: number(data.centerY) };
+			const radius = number(data.radius);
+			if (radius <= 0) {
+				diagnostics.push({ id, type: 'CIRCLE', message: 'CIRCLE has invalid radius' });
+				return null;
+			}
+			return { id, type: 'CIRCLE', center, radius, bbox: circleBBox({ cx: center.x, cy: center.y, radius }) };
+		}
+		case 'ELLIPSE': {
+			const center = { x: number(data.centerX), y: number(data.centerY) };
+			const radiusX = number(data.radiusX);
+			const radiusY = number(data.radiusY);
+			const rotation = number(data.rotation);
+			if (radiusX <= 0 || radiusY <= 0) {
+				diagnostics.push({ id, type: 'ELLIPSE', message: 'ELLIPSE has invalid radii' });
+				return null;
+			}
+			return { id, type: 'ELLIPSE', center, radiusX, radiusY, rotation, bbox: ellipseBBox({ cx: center.x, cy: center.y, radiusX, radiusY, rotation }) };
+		}
+		default:
+			return null;
+	}
 }
 
 export function extractSchematicPage(source: string): ParsedSchematicPage {
 	const document = parseSourceLog(source);
 	const rectRecords = effectiveRecordsByType(document, 'RECT');
+	const polyRecords = effectiveRecordsByType(document, 'POLY');
+	const circleRecords = effectiveRecordsByType(document, 'CIRCLE');
+	const ellipseRecords = effectiveRecordsByType(document, 'ELLIPSE');
+	const arcRecords = effectiveRecordsByType(document, 'ARC');
 	const componentRecords = effectiveRecordsByType(document, 'COMPONENT');
 	const attrRecords = effectiveRecordsByType(document, 'ATTR');
 	const textRecords = effectiveRecordsByType(document, 'TEXT');
+	const diagnostics: SourceSchematicDiagnostic[] = [];
 	const attrsByParent = new Map<string, Record<string, string>>();
 	for (const record of attrRecords) {
 		const data = primitiveData(record);
@@ -99,11 +162,15 @@ export function extractSchematicPage(source: string): ParsedSchematicPage {
 			attrsByParent.set(parentId, {});
 		attrsByParent.get(parentId)![key] = text(data.value);
 	}
-	const rects = rectRecords.map((record, index) => {
-		const data = primitiveData(record);
-		const attrs = attrsByParent.get(String(record.header.id)) ?? {};
-		return { id: String(record.header.id), label: attrs.Name || `矩形 ${index + 1}`, bbox: rectBBox(data) };
-	});
+	const shapeRecords = [...rectRecords, ...polyRecords, ...circleRecords, ...ellipseRecords];
+	const shapes = shapeRecords
+		.map(record => parseShapeRecord(record, attrsByParent.get(String(record.header.id)) ?? {}, diagnostics))
+		.filter((shape): shape is SourceSchematicShape => shape !== null);
+	for (const record of arcRecords)
+		diagnostics.push({ id: String(record.header.id), type: 'ARC', message: 'ARC retained without normalized bbox' });
+	const rects = shapes
+		.filter((shape): shape is Extract<SourceSchematicShape, { type: 'RECT' }> => shape.type === 'RECT')
+		.map((shape, index) => ({ id: shape.id, label: attrsByParent.get(shape.id)?.Name ?? `矩形 ${index + 1}`, bbox: shape.bbox }));
 	const components = componentRecords.map((record) => {
 		const data = primitiveData(record);
 		const id = String(record.header.id);
@@ -138,7 +205,7 @@ export function extractSchematicPage(source: string): ParsedSchematicPage {
 		const lineHeight = fontSize * 1.2;
 		return { id: String(record.header.id), content, x, y, rotation: number(data.rotation), fontSize, bbox: { minX: x, minY: y - lines.length * lineHeight, maxX: x + Math.max(fontSize, maxLineLength * fontSize * 0.65), maxY: y } };
 	});
-	return { uuid: document.uuid, rects, components, texts };
+	return { uuid: document.uuid, rects, shapes, diagnostics, components, texts };
 }
 
 export function containsPoint(rect: BBox, x: number, y: number): boolean {
