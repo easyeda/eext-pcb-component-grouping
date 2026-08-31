@@ -452,15 +452,112 @@ function buildPcbPatch(source: string, groups: PlannedGroup[], geometry: Map<str
 	return { source: appendRecords(source, pending), overlays, updated };
 }
 
+async function collectSelectionGroupingFromSource(project: any, currentDocument: any): Promise<ProjectGroupingResult> {
+	const boardIndex = project.data.findIndex((board: any) => (board.schematic?.page ?? []).some((page: any) => page.uuid === currentDocument.uuid));
+	if (boardIndex < 0)
+		throw new Error('选中模式需要打开当前 Board 的原理图页。');
+	const board = project.data[boardIndex];
+	const selectedIds = await eda.sch_SelectControl.getAllSelectedPrimitives_PrimitiveId();
+	if (!Array.isArray(selectedIds) || selectedIds.length === 0)
+		throw new Error('当前没有选中任何图元。请先在原理图中选中器件或形状。');
+	const selectedSet = new Set(selectedIds);
+	const source = await eda.sys_FileManager.getDocumentSource();
+	if (!source)
+		throw new Error('无法获取当前原理图源码。');
+	const parsed = extractSchematicPage(source);
+	const selectedComponents = parsed.components.filter(component => selectedSet.has(component.id));
+	if (selectedComponents.length === 0)
+		throw new Error('选中的图元中没有器件。请选中原理图器件后重试。');
+	const allPoints = selectedComponents.map(component => ({ x: component.x, y: component.y }));
+	const bbox: BBox = {
+		minX: Math.min(...allPoints.map(point => point.x)),
+		minY: Math.min(...allPoints.map(point => point.y)),
+		maxX: Math.max(...allPoints.map(point => point.x)),
+		maxY: Math.max(...allPoints.map(point => point.y)),
+	};
+	const selectedTexts = parsed.texts.filter(text => containsPoint(bbox, text.x, text.y) || intersects(bbox, text.bbox));
+	const assignments = selectedComponents.map(component => toSchematicComponent(component, currentDocument.name ?? '选中区域', currentDocument.uuid, 'selection', '选中区域'));
+	const page: PageGroupingResult = {
+		boardName: board.name ?? `Board ${boardIndex + 1}`,
+		boardIndex,
+		schematicUuid: board.schematic?.uuid ?? '',
+		pageUuid: currentDocument.uuid,
+		pageName: currentDocument.name ?? '选中区域',
+		rectangles: [{ primitiveId: 'selection', label: '选中区域', bbox, components: assignments, texts: selectedTexts.map(item => toSchematicText(item, currentDocument.name ?? '选中区域', currentDocument.uuid)) }],
+		unclassified: [],
+		warnings: [],
+	};
+	if (!board.pcb?.uuid)
+		throw new Error('当前 Board 没有可用的 PCB。');
+	const pcbTab = await eda.dmt_EditorControl.openDocument(board.pcb.uuid);
+	await eda.dmt_EditorControl.activateDocument(pcbTab);
+	const pcbSource = await eda.sys_FileManager.getDocumentSource();
+	if (!pcbSource)
+		throw new Error('无法获取当前 Board 的 PCB 源码。');
+	const parsedPcb = extractPcbDocument(pcbSource);
+	const groups = planGroups([page], parsedPcb.components);
+	if (groups.length === 0)
+		throw new Error('选中的器件没有可匹配的 PCB 器件。');
+	const footprintSources = await eda.sys_FileManager.getDocumentFootprintSources();
+	const geometry = await measurePcbGeometry(parsedPcb.components, Array.isArray(footprintSources) ? footprintSources : [], parseSourceLog(pcbSource).records);
+	const patch = buildPcbPatch(pcbSource, groups, geometry);
+	const confirmation = await requestConfirmation(`将通过源码移动 ${patch.updated.length} 个 PCB 器件，并生成 ${patch.overlays.length} 个分组。是否继续？`);
+	if (!confirmation)
+		throw new Error('确认窗口未返回“确定”，已停止操作。');
+	await eda.sys_Storage.setExtensionUserConfig(SOURCE_BACKUP_KEY, JSON.stringify({ pcbUuid: board.pcb.uuid, source: pcbSource, createdAt: new Date().toISOString(), mode: 'selection' }));
+	const success = await eda.sys_FileManager.setDocumentSource(patch.source);
+	if (!success)
+		throw new Error('PCB 源码写入失败。');
+	const written = await eda.sys_FileManager.getDocumentSource();
+	if (!written) {
+		await eda.sys_FileManager.setDocumentSource(pcbSource);
+		throw new Error('写入后无法重新读取 PCB 源码，已恢复原始源码。');
+	}
+	const verified = extractPcbDocument(written);
+	for (const expected of patch.updated) {
+		const actual = verified.components.find(component => component.id === expected.id);
+		if (!actual || Math.abs(actual.x - expected.x) > 0.001 || Math.abs(actual.y - expected.y) > 0.001 || Math.abs(actual.angle - expected.angle) > 0.001) {
+			await eda.sys_FileManager.setDocumentSource(pcbSource);
+			throw new Error(`器件 ${expected.designator || expected.id} 源码验证失败，已恢复原始源码。`);
+		}
+	}
+	await eda.pcb_Document.save();
+	const pcbComponents: PcbComponentRecord[] = verified.components.map(component => ({ primitiveId: component.id, label: component.designator || component.id, designator: component.designator, name: component.deviceUuid, uniqueId: '', x: component.x, y: component.y, rotation: component.angle }));
+	const matches: ProjectGroupingResult['pcbMatches'] = [];
+	const unmatched: ProjectGroupingResult['unmatchedSchematic'] = [];
+	for (const item of assignments) {
+		const pcb = verified.components.find(component => normalizedDesignator(component.designator) === normalizedDesignator(item.designator)) ?? matchByDesignator(item.designator, verified.components);
+		if (pcb)
+			matches.push({ designator: pcb.designator, name: pcb.deviceUuid, primitiveId: pcb.id, x: pcb.x, y: pcb.y, rotation: pcb.angle, matchedSchematic: [{ boardName: page.boardName, pageName: page.pageName, label: item.label, primitiveId: item.primitiveId, uniqueId: item.uniqueId }] });
+		else
+			unmatched.push({ boardName: page.boardName, pageName: page.pageName, label: item.label, primitiveId: item.primitiveId, uniqueId: item.uniqueId });
+	}
+	const result: ProjectGroupingResult = {
+		projectUuid: project.uuid,
+		projectName: project.friendlyName || project.name,
+		generatedAt: new Date().toISOString(),
+		pages: [page],
+		pcbComponents,
+		pcbMatches: matches,
+		unmatchedSchematic: unmatched,
+		warnings: [],
+		pcbOverlays: patch.overlays,
+	};
+	await eda.sys_Storage.setExtensionUserConfig(STORAGE_KEY, JSON.stringify(result));
+	return result;
+}
+
 export async function collectProjectGroupingFromSource(mode: GroupingMode): Promise<ProjectGroupingResult> {
 	const project = await eda.dmt_Project.getCurrentProjectInfo();
 	if (!project)
 		throw new Error('当前没有打开工程。');
-	if (mode === 'selection')
-		throw new Error('源码模式暂不支持选中分组，请使用矩形分组、图页分组或混合分组。');
 	const currentDocument = await eda.dmt_SelectControl.getCurrentDocumentInfo();
 	if (!currentDocument?.uuid)
 		throw new Error('无法识别当前文档，请先打开当前 Board 的原理图页或 PCB。');
+	if (mode === 'selection') {
+		const selectionResult = await collectSelectionGroupingFromSource(project, currentDocument);
+		return selectionResult;
+	}
 	const boardIndex = project.data.findIndex((board: any) => board.pcb?.uuid === currentDocument.uuid || (board.schematic?.page ?? []).some((page: any) => page.uuid === currentDocument.uuid));
 	if (boardIndex < 0)
 		throw new Error('当前文档不属于工程中的任何 Board。');
