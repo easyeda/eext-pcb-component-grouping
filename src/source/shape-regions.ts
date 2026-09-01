@@ -177,6 +177,40 @@ function boundaryEdges(points: Point[], sourceId: string, closed: boolean): Boun
 	return edges;
 }
 
+function splitEdgeAt(edge: BoundaryEdge, point: Point): [BoundaryEdge, BoundaryEdge] {
+	return [
+		{ sourceId: edge.sourceId, start: edge.start, end: point },
+		{ sourceId: edge.sourceId, start: point, end: edge.end },
+	];
+}
+
+// A divider polyline often touches the middle of a rectangle edge rather than
+// a rectangle vertex. Split touched edges so endpoint matching can form loops.
+function injectPolylineEndpoints(edges: BoundaryEdge[], tolerance: number): BoundaryEdge[] {
+	let result = edges;
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (let outer = 0; outer < result.length && !changed; outer += 1) {
+			for (let inner = 0; inner < result.length && !changed; inner += 1) {
+				if (outer === inner)
+					continue;
+				for (const endpoint of [result[inner].start, result[inner].end]) {
+					const onEdge = onSegment(result[outer].start, result[outer].end, endpoint);
+					const notEndpoint = key(endpoint, tolerance) !== key(result[outer].start, tolerance) && key(endpoint, tolerance) !== key(result[outer].end, tolerance);
+					if (onEdge && notEndpoint) {
+						const [left, right] = splitEdgeAt(result[outer], endpoint);
+						result = [...result.slice(0, outer), left, right, ...result.slice(outer + 1)];
+						changed = true;
+						break;
+					}
+				}
+			}
+		}
+	}
+	return result;
+}
+
 function extractLoops(edges: BoundaryEdge[], tolerance: number): BoundaryEdge[][] {
 	const nodes = new Map<string, BoundaryEdge[]>();
 	for (const edge of edges) {
@@ -191,11 +225,21 @@ function extractLoops(edges: BoundaryEdge[], tolerance: number): BoundaryEdge[][
 			const endKey = key(current.end, tolerance);
 			if (path.length > 1 && endKey === startKey)
 				return path;
-			const next = (nodes.get(endKey) ?? []).find(candidate => candidate !== current && !path.includes(candidate));
-			if (!next)
+			const next = (nodes.get(endKey) ?? []).filter(candidate => candidate !== current && !path.includes(candidate));
+			if (next.length === 0)
 				return null;
-			path.push(next);
-			current = next;
+			// At a T-junction, turn right relative to the incoming direction. This
+			// is the standard planar-face walk and yields the two faces on either
+			// side of a divider polyline.
+			const heading = { x: current.end.x - current.start.x, y: current.end.y - current.start.y };
+			const ranked = next.map((candidate) => {
+				const direction = { x: candidate.end.x - candidate.start.x, y: candidate.end.y - candidate.start.y };
+				const cross = heading.x * direction.y - heading.y * direction.x;
+				const dot = heading.x * direction.x + heading.y * direction.y;
+				return { candidate, score: cross * 1e9 - dot };
+			}).sort((a, b) => b.score - a.score);
+			path.push(ranked[0].candidate);
+			current = ranked[0].candidate;
 		}
 	};
 	const used = new Set<BoundaryEdge>();
@@ -245,31 +289,39 @@ export function buildShapeRegions(shapes: RegionShape[], options: BuildShapeRegi
 			}
 		}
 	}
-	const loops = extractLoops(openEdges, tolerance);
+	const loops = extractLoops(injectPolylineEndpoints(openEdges, tolerance), tolerance);
 	const seenRegionKeys = new Set<string>();
 	for (const loop of loops) {
 		const polygon: Point[] = [];
 		for (const edge of loop) {
 			if (polygon.length === 0 || polygon[polygon.length - 1].x !== edge.start.x || polygon[polygon.length - 1].y !== edge.start.y)
 				polygon.push(edge.start);
+			// The walk may reverse an edge at a T-junction; the resulting vertex
+			// sequence still traces the face when duplicates are skipped.
+			polygon.push(edge.end);
 		}
 		if (polygon.length > 1 && polygon[0].x === polygon[polygon.length - 1].x && polygon[0].y === polygon[polygon.length - 1].y)
 			polygon.pop();
-		if (polygon.length < 3) {
+		const compact = polygon.filter((point, index) => {
+			const previous = polygon[index - 1];
+			const next = polygon[index + 1];
+			return !previous || !next || !(point.x === previous.x && point.y === previous.y) || !(point.x === next.x && point.y === next.y);
+		});
+		if (compact.length < 3) {
 			diagnostics.push({ code: 'open-loop', sourceIds: loop.map(edge => edge.sourceId), message: 'Connected edges do not form a closed region' });
 			continue;
 		}
-		if (polygonHasSelfIntersection(polygon)) {
+		if (polygonHasSelfIntersection(compact)) {
 			diagnostics.push({ code: 'self-intersecting', sourceIds: loop.map(edge => edge.sourceId), message: 'Connected loop self-intersects' });
 			continue;
 		}
 		const sourceIds = Array.from(new Set(loop.map(edge => edge.sourceId)));
-		const polygonKey = polygon.map(point => `${point.x},${point.y}`).join('\u0002');
+		const polygonKey = compact.map(point => `${point.x},${point.y}`).join('\u0002');
 		const regionKey = polygonKey;
 		if (seenRegionKeys.has(regionKey))
 			continue;
 		seenRegionKeys.add(regionKey);
-		regions.push(createRegion('polyline', sourceIds, polygon, polygonBBox(polygon)));
+		regions.push(createRegion('polyline', sourceIds, compact, polygonBBox(compact)));
 	}
 	return { regions, diagnostics };
 }

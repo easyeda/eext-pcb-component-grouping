@@ -4,6 +4,7 @@ import type { SourceHeader } from './source-log';
 import { extractFootprintGeometries, transformFootprintBBox } from './footprint-source';
 import { extractPcbDocument, matchByDesignator } from './pcb-source';
 import { containsPoint, extractSchematicPage, intersects } from './schematic-source';
+import { buildShapeRegions, chooseSmallestContainingRegion, regionIntersectsBBox } from './shape-regions';
 import { appendRecords, effectiveRecordsByType, getMaxTicket, parseSourceLog } from './source-log';
 
 declare const eda: any;
@@ -91,16 +92,45 @@ function buildPageResult(source: string, boardName: string, boardIndex: number, 
 			: { minX: 0, minY: 0, maxX: 100, maxY: 100 };
 		return { boardName, boardIndex, schematicUuid, pageUuid: parsed.uuid, pageName, rectangles: [{ primitiveId: `page-${parsed.uuid}`, label: pageName, bbox, components: parsed.components.map(component => toSchematicComponent(component, pageName, parsed.uuid, `page-${parsed.uuid}`, pageName)), texts: parsed.texts.map(item => toSchematicText(item, pageName, parsed.uuid)) }], unclassified: [], warnings };
 	}
+	const regionShapes = parsed.shapes.map((shape) => {
+		if (shape.type === 'RECT')
+			return { type: 'rectangle' as const, id: shape.id, x1: shape.corner1.x, y1: shape.corner1.y, x2: shape.corner2.x, y2: shape.corner2.y };
+		if (shape.type === 'POLY')
+			return { type: 'polyline' as const, id: shape.id, points: shape.points, closed: shape.closed };
+		if (shape.type === 'CIRCLE')
+			return { type: 'circle' as const, id: shape.id, cx: shape.center.x, cy: shape.center.y, radius: shape.radius };
+		return { type: 'ellipse' as const, id: shape.id, cx: shape.center.x, cy: shape.center.y, radiusX: shape.radiusX, radiusY: shape.radiusY, rotation: shape.rotation };
+	});
+	const builtResult = buildShapeRegions(regionShapes);
+	const builtRegions = builtResult.regions;
+	const regions = builtRegions.map((region, index) => ({ id: region.sourceIds[0] ?? `region-${index + 1}`, label: `区域 ${index + 1}`, sourceIds: region.sourceIds, bbox: region.bbox, kind: region.kind, region }));
 	const assignments = parsed.components.map((component) => {
 		const anchorX = component.designatorX ?? component.x;
 		const anchorY = component.designatorY ?? component.y;
 		const hits = parsed.rects.filter(rect => containsPoint(rect.bbox, anchorX, anchorY) || containsPoint(rect.bbox, component.x, component.y)).sort((a, b) => (a.bbox.maxX - a.bbox.minX) * (a.bbox.maxY - a.bbox.minY) - (b.bbox.maxX - b.bbox.minX) * (b.bbox.maxY - b.bbox.minY));
 		const rect = hits[0];
-		if (!rect && mode !== 'hybrid')
+		if (rect)
+			return toSchematicComponent(component, pageName, parsed.uuid, rect.id, rect.label);
+		const region = chooseSmallestContainingRegion(builtRegions, { x: anchorX, y: anchorY }) ?? chooseSmallestContainingRegion(builtRegions, { x: component.x, y: component.y });
+		if (region) {
+			const regionGroup = regions.find(item => item.sourceIds.length === region.sourceIds.length && item.sourceIds.every(id => region.sourceIds.includes(id)));
+			if (regionGroup)
+				return toSchematicComponent(component, pageName, parsed.uuid, regionGroup.id, regionGroup.label);
+		}
+		if (mode !== 'hybrid')
 			warnings.push(`页面 ${pageName} 中器件 ${component.designator || component.id} 未落入任何矩形（锚点 ${anchorX},${anchorY}）。`);
-		return toSchematicComponent(component, pageName, parsed.uuid, rect?.id ?? null, rect?.label ?? null);
+		return toSchematicComponent(component, pageName, parsed.uuid, null, null);
 	});
-	const rectangles = parsed.rects.map(rect => ({ primitiveId: rect.id, label: rect.label, bbox: rect.bbox, components: assignments.filter(item => item.rectangleId === rect.id), texts: parsed.texts.filter(item => containsPoint(rect.bbox, item.x, item.y) || intersects(rect.bbox, item.bbox)).map(item => toSchematicText(item, pageName, parsed.uuid)) }));
+	const rectangles = [
+		...parsed.rects.map(rect => ({ primitiveId: rect.id, label: rect.label, bbox: rect.bbox, components: assignments.filter(item => item.rectangleId === rect.id), texts: parsed.texts.filter(item => containsPoint(rect.bbox, item.x, item.y) || intersects(rect.bbox, item.bbox)).map(item => toSchematicText(item, pageName, parsed.uuid)) })),
+		...regions.filter(region => !parsed.rects.some(rect => region.sourceIds.includes(rect.id))).map(region => ({
+			primitiveId: region.id,
+			label: region.label,
+			bbox: region.bbox,
+			components: assignments.filter(item => item.rectangleId === region.id),
+			texts: parsed.texts.filter(item => regionIntersectsBBox(region.region, item.bbox) || containsPoint(region.bbox, item.x, item.y)).map(item => toSchematicText(item, pageName, parsed.uuid)),
+		})),
+	];
 	const unclassified = assignments.filter(item => !item.rectangleId);
 	if (mode === 'hybrid' && unclassified.length) {
 		const pageGroupId = `page-unframed-${parsed.uuid}`;

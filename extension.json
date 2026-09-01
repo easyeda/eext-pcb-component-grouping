@@ -3,7 +3,7 @@
 	"uuid": "dbc97b0e719e418b953f012be055c7a2",
 	"displayName": "PCB器件分组器",
 	"description": "基于文档源码的器件快速分组扩展，将PCB中的散杂器件按照原理图图页或图页内矩形框分组，支持复杂多器件工程。",
-	"version": "1.8.3",
+	"version": "1.9.1",
 	"publisher": "easyeda",
 	"engines": {
 		"eda": "^3.2.0"

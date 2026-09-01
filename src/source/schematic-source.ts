@@ -1,5 +1,7 @@
+import type { ClosedRegion } from './shape-regions';
 import type { SourceRecord } from './source-log';
 import { circleBBox, ellipseBBox, polylineBBox, rectangleBBox } from './shape-geometry';
+import { buildShapeRegions } from './shape-regions';
 import { effectiveRecordsByType, parseSourceLog } from './source-log';
 
 export interface BBox {
@@ -39,6 +41,13 @@ export interface SourceRect {
 	bbox: BBox;
 }
 
+export interface SourceRegionGroup {
+	id: string;
+	label: string;
+	sourceIds: string[];
+	bbox: BBox;
+}
+
 export type SourceSchematicShape
 	= | { id: string; type: 'RECT'; rotation: number; bbox: BBox; corner1: { x: number; y: number }; corner2: { x: number; y: number } }
 		| { id: string; type: 'POLY'; points: Array<{ x: number; y: number }>; closed: boolean; bbox: BBox }
@@ -54,6 +63,7 @@ export interface SourceSchematicDiagnostic {
 export interface ParsedSchematicPage {
 	uuid: string;
 	rects: SourceRect[];
+	regions: SourceRegionGroup[];
 	shapes: SourceSchematicShape[];
 	diagnostics: SourceSchematicDiagnostic[];
 	components: SourceSchematicComponent[];
@@ -82,17 +92,35 @@ function rectBBox(data: Record<string, unknown>): BBox {
 }
 
 function parsePolyPoints(points: unknown): Array<{ x: number; y: number }> | null {
-	if (!Array.isArray(points) || points.length === 0 || points.length % 2 !== 0)
+	if (!Array.isArray(points) || points.length < 2)
 		return null;
+	const source = points.every(item => typeof item === 'number') && points.length % 2 === 0
+		? points.flatMap((_, index) => index % 2 === 0 ? [[points[index], points[index + 1]] as [number, number]] : [])
+		: points as Array<Record<string, unknown>>;
 	const parsed: Array<{ x: number; y: number }> = [];
-	for (let index = 0; index < points.length; index += 2) {
-		const x = number(points[index], Number.NaN);
-		const y = number(points[index + 1], Number.NaN);
-		if (!Number.isFinite(x) || !Number.isFinite(y))
+	for (const item of source) {
+		const x = Array.isArray(item) ? item[0] : item.x;
+		const y = Array.isArray(item) ? item[1] : item.y;
+		const numericX = number(x, Number.NaN);
+		const numericY = number(y, Number.NaN);
+		if (!Number.isFinite(numericX) || !Number.isFinite(numericY))
 			return null;
-		parsed.push({ x, y });
+		parsed.push({ x: numericX, y: numericY });
 	}
 	return parsed;
+}
+
+function toRegionShape(shape: SourceSchematicShape): import('./shape-regions').RegionShape | null {
+	switch (shape.type) {
+		case 'RECT':
+			return { type: 'rectangle', id: shape.id, x1: shape.corner1.x, y1: shape.corner1.y, x2: shape.corner2.x, y2: shape.corner2.y };
+		case 'POLY':
+			return { type: 'polyline', id: shape.id, points: shape.points, closed: shape.closed };
+		case 'CIRCLE':
+			return { type: 'circle', id: shape.id, cx: shape.center.x, cy: shape.center.y, radius: shape.radius };
+		case 'ELLIPSE':
+			return { type: 'ellipse', id: shape.id, cx: shape.center.x, cy: shape.center.y, radiusX: shape.radiusX, radiusY: shape.radiusY, rotation: shape.rotation };
+	}
 }
 
 function parseShapeRecord(record: SourceRecord, attrs: Record<string, string>, diagnostics: SourceSchematicDiagnostic[]): SourceSchematicShape | null {
@@ -140,6 +168,14 @@ function parseShapeRecord(record: SourceRecord, attrs: Record<string, string>, d
 	}
 }
 
+function shapeRegionLabel(sourceIds: string[], shapeNames: Map<string, string>, kind: ClosedRegion['kind'], index: number): string {
+	const name = sourceIds.map(id => shapeNames.get(id)).find(Boolean);
+	if (name)
+		return name;
+	const names: Record<ClosedRegion['kind'], string> = { rectangle: '矩形', polyline: '折线', circle: '圆形', ellipse: '椭圆' };
+	return `${names[kind]} ${index + 1}`;
+}
+
 export function extractSchematicPage(source: string): ParsedSchematicPage {
 	const document = parseSourceLog(source);
 	const rectRecords = effectiveRecordsByType(document, 'RECT');
@@ -171,6 +207,15 @@ export function extractSchematicPage(source: string): ParsedSchematicPage {
 	const rects = shapes
 		.filter((shape): shape is Extract<SourceSchematicShape, { type: 'RECT' }> => shape.type === 'RECT')
 		.map((shape, index) => ({ id: shape.id, label: attrsByParent.get(shape.id)?.Name ?? `矩形 ${index + 1}`, bbox: shape.bbox }));
+	const regionShapes = shapes.map(toRegionShape).filter((shape): shape is import('./shape-regions').RegionShape => shape !== null);
+	const builtRegions = buildShapeRegions(regionShapes);
+	const shapeNames = new Map(shapes.map(shape => [shape.id, attrsByParent.get(shape.id)?.Name ?? '']));
+	const regions: SourceRegionGroup[] = builtRegions.regions.map((region, index) => ({
+		id: region.sourceIds[0] ?? `region-${index + 1}`,
+		label: shapeRegionLabel(region.sourceIds, shapeNames, region.kind, index),
+		sourceIds: region.sourceIds,
+		bbox: region.bbox,
+	}));
 	const components = componentRecords.map((record) => {
 		const data = primitiveData(record);
 		const id = String(record.header.id);
@@ -205,7 +250,7 @@ export function extractSchematicPage(source: string): ParsedSchematicPage {
 		const lineHeight = fontSize * 1.2;
 		return { id: String(record.header.id), content, x, y, rotation: number(data.rotation), fontSize, bbox: { minX: x, minY: y - lines.length * lineHeight, maxX: x + Math.max(fontSize, maxLineLength * fontSize * 0.65), maxY: y } };
 	});
-	return { uuid: document.uuid, rects, shapes, diagnostics, components, texts };
+	return { uuid: document.uuid, rects, regions, shapes, diagnostics, components, texts };
 }
 
 export function containsPoint(rect: BBox, x: number, y: number): boolean {
