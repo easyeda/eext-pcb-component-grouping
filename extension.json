@@ -26,6 +26,44 @@
 	"entry": "./dist/index",
 	"dependentExtensions": {},
 	"headerMenus": {
+		"sch": [
+			{
+				"id": "menuId3",
+				"title": "PCB器件分组器",
+				"menuItems": [
+					{
+						"id": "GroupingRectangle",
+						"title": "矩形分组",
+						"registerFn": "groupingRectangle"
+					},
+					{
+						"id": "GroupingPage",
+						"title": "图页分组",
+						"registerFn": "groupingPage"
+					},
+					{
+						"id": "GroupingHybrid",
+						"title": "混合分组",
+						"registerFn": "groupingHybrid"
+					},
+					{
+						"id": "GroupingSelection",
+						"title": "选中分组",
+						"registerFn": "groupingSelection"
+					},
+					{
+						"id": "GroupingRollback",
+						"title": "回退分组源码",
+						"registerFn": "groupingRollback"
+					},
+					{
+						"id": "About",
+						"title": "About...",
+						"registerFn": "about"
+					}
+				]
+			}
+		],
 		"pcb": [
 			{
 				"id": "menuId3",
